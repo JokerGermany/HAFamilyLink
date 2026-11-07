@@ -1,0 +1,93 @@
+name: Sync upstream + apply fork patches
+
+# Rebuilds main as: latest upstream main + fork-patches/ applied on top.
+# Runs daily, on manual trigger, and when the fork patches change.
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild even if upstream has not changed"
+        type: boolean
+        default: false
+  push:
+    branches: [fork-patches]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: noiwid/HAFamilyLink
+  UPSTREAM_BRANCH: main
+  TARGET_BRANCH: main
+  PATCH_BRANCH: fork-patches
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      # The fork tooling (overlay, apply.py, this workflow) lives on its own
+      # branch, so a force-rebuilt main can never lose it.
+      - name: Checkout patch branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PATCH_BRANCH }}
+          path: patches
+          # PAT with "repo" + "workflow" scope; needed because upstream may
+          # change files under .github/workflows (GITHUB_TOKEN may not push those)
+          # and so the push triggers the Docker build workflow.
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Checkout target branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+          path: repo
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Fetch upstream
+        id: up
+        working-directory: repo
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags upstream "${UPSTREAM_BRANCH}"
+          UP_SHA=$(git rev-parse "upstream/${UPSTREAM_BRANCH}")
+          PATCH_SHA=$(git -C ../patches rev-parse HEAD)
+          LAST_UP=$(git log -1 --format=%B | sed -n 's/^Upstream-Commit: //p')
+          LAST_PATCH=$(git log -1 --format=%B | sed -n 's/^Fork-Patches-Commit: //p')
+          echo "upstream=$UP_SHA  last=$LAST_UP"
+          echo "patches=$PATCH_SHA  last=$LAST_PATCH"
+          echo "up_sha=$UP_SHA" >> "$GITHUB_OUTPUT"
+          echo "patch_sha=$PATCH_SHA" >> "$GITHUB_OUTPUT"
+          if [ "$UP_SHA" = "$LAST_UP" ] && [ "$PATCH_SHA" = "$LAST_PATCH" ] \
+             && [ "${{ inputs.force }}" != "true" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Nothing to do."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rebuild main = upstream + patches
+        if: steps.up.outputs.changed == 'true'
+        working-directory: repo
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898699+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "${TARGET_BRANCH}" "${{ steps.up.outputs.up_sha }}"
+          python3 ../patches/fork-patches/apply.py "$PWD"
+          python3 -m py_compile familylink-playwright/app/main.py \
+            familylink-playwright/app/api/steam_routes.py \
+            familylink-playwright/app/auth/steam_auth.py \
+            familylink-playwright/app/storage/steam_state.py
+          git add -A
+          git commit -m "Apply fork patches on top of upstream" \
+            -m "Upstream-Commit: ${{ steps.up.outputs.up_sha }}" \
+            -m "Fork-Patches-Commit: ${{ steps.up.outputs.patch_sha }}"
+          git push --force-with-lease origin "${TARGET_BRANCH}"
