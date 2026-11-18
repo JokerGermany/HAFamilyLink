@@ -6,6 +6,8 @@ Usage: python3 fork-patches/apply.py [REPO_ROOT]
 1. Copies everything under fork-patches/overlay/ into the repo (1:1).
 2. Inserts the Steam router into familylink-playwright/app/main.py using
    anchors instead of a fixed diff, so upstream edits around it don't break it.
+3. Inserts fork-patches/readme-notice.md into README.md right below the
+   title, keeping the rest of upstream's README as it is.
 Idempotent: running it twice changes nothing. Exits non-zero if an anchor
 is missing, so the sync workflow stops instead of pushing a broken build.
 """
@@ -16,6 +18,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else HERE.parent
 OVERLAY = HERE / "overlay"
+README_NOTICE = HERE / "readme-notice.md"
+NOTICE_START = "<!-- fork-notice:start -->"
+NOTICE_END = "<!-- fork-notice:end -->"
 
 IMPORT_LINE = "from app.api.steam_routes import router as steam_router"
 INCLUDE_LINE = "app.include_router(steam_router)"
@@ -69,7 +74,32 @@ def patch_main() -> None:
     main.write_text("".join(lines), encoding="utf-8")
 
 
+def patch_readme() -> None:
+    readme = ROOT / "README.md"
+    if not readme.is_file():
+        fail(f"{readme} not found")
+    text = readme.read_text(encoding="utf-8")
+    notice = README_NOTICE.read_text(encoding="utf-8").strip() + "\n"
+
+    # Already there (re-run): replace the old block so edits to the notice apply.
+    if NOTICE_START in text and NOTICE_END in text:
+        head, rest = text.split(NOTICE_START, 1)
+        _, tail = rest.split(NOTICE_END, 1)
+        text = head + notice.rstrip("\n") + tail
+    else:
+        # anchor: the first "# " title line
+        lines = text.splitlines(keepends=True)
+        idx = next((i for i, l in enumerate(lines) if l.startswith("# ")), None)
+        if idx is None:
+            fail("anchor '# ' title not found in README.md")
+        lines.insert(idx + 1, "\n" + notice)
+        text = "".join(lines)
+    readme.write_text(text, encoding="utf-8")
+    print("README.md: fork notice added")
+
+
 if __name__ == "__main__":
     copy_overlay()
     patch_main()
+    patch_readme()
     print("fork patches applied")
