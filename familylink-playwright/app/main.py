@@ -16,6 +16,7 @@ from app.auth.browser import BrowserAuthManager
 from app.storage.file_storage import SharedStorage
 from app.config import get_config
 from app.translations import get_translations
+from app.api.steam_routes import router as steam_router
 
 # Configure logging
 config = get_config()
@@ -33,6 +34,7 @@ app = FastAPI(
     description="Authentication service for Google Family Link integration",
     version="1.0.0"
 )
+app.include_router(steam_router)
 
 # CORS configuration — restrict to local HA origins
 app.add_middleware(
